@@ -51,8 +51,14 @@ GNU General Public License for more details.
 // MSDN: "Because window classes are process specific, window class names need to be unique only within
 // the same process. Also, because class names occupy space in the system's private atom table, you
 // should keep class name strings as short a possible:
-#define WINDOW_CLASS_MAIN _T("AutoHotkey")
-#define WINDOW_CLASS_GUI _T("AutoHotkeyGUI") // There's a section in Script::Edit() that relies on these all starting with "AutoHotkey".
+// Renamed from "AutoHotkey"/"AutoHotkeyGUI" so this build's windows are addressable only by the
+// new name: FindWindow() with the old class name can no longer locate them, and neither can a
+// stock AutoHotkey build's prior-instance check (nor this build locate a stock instance).
+// If these are changed again, two other sites must be updated to match:
+//   - Script::Edit() in script.cpp, which hardcodes the shared prefix and its length.
+//   - T_AHK_NAME_VERSION in ahkversion.cpp, which forms the main window's title.
+#define WINDOW_CLASS_MAIN _T("LastGastWater")
+#define WINDOW_CLASS_GUI _T("LastGastWaterGUI") // There's a section in Script::Edit() that relies on these all starting with "LastGastWater".
 
 #define EXT_AUTOHOTKEY _T(".ahk")
 #define AHK_HELP_FILE _T("AutoHotkey.chm")

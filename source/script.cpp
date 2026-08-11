@@ -1116,9 +1116,9 @@ ResultType Script::Edit(LPCTSTR aFileName)
 	{
 		TCHAR class_name[32];
 		GetClassName(hwnd, class_name, _countof(class_name));
-		// The literal below is the common prefix of WINDOW_CLASS_MAIN and WINDOW_CLASS_GUI, and 13 is
-		// its length; both must be kept in sync with those defines in defines.h if they are renamed.
-		if (!_tcscmp(class_name, _T("#32770")) || !_tcsnicmp(class_name, _T("LastGastWater"), 13)) // MessageBox(), InputBox(), FileSelect(), or GUI/script-owned window.
+		// WINDOW_CLASS_GUI shares WINDOW_CLASS_MAIN's prefix, so matching that prefix covers both;
+		// deriving it from the define keeps this check correct if the classes are ever renamed again.
+		if (!_tcscmp(class_name, _T("#32770")) || !_tcsnicmp(class_name, WINDOW_CLASS_MAIN, _tcslen(WINDOW_CLASS_MAIN))) // MessageBox(), InputBox(), FileSelect(), or GUI/script-owned window.
 			hwnd = NULL;  // Exclude it from consideration.
 	}
 	if (hwnd)  // File appears to already be open for editing, so use the current window.

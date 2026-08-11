@@ -34,22 +34,29 @@ Current values:
 | GUI window class | `LastGastWaterGUI` |
 | Main window title | `<script path> - LastGastWater v<version>` |
 
-### Three coupled sites — change them together
+### Two coupled sites — change them together
 
-Renaming again means updating all three, or the build breaks subtly rather than loudly:
+Renaming again means updating both, or the build breaks subtly rather than loudly:
 
 1. **`source/defines.h`** — `WINDOW_CLASS_MAIN` and `WINDOW_CLASS_GUI`. Nearly every
    consumer goes through these macros (`RegisterClassEx` and `CreateWindowEx` in
    `Script::CreateWindows()` and `GuiType::Create()`, `UnregisterClass` in `~Script()`,
    and the `FindWindow` prior-instance check in `CheckPriorInstance()`), so they follow
    automatically.
-2. **`source/script.cpp`, in `Script::Edit()`** — hardcodes the classes' shared prefix
-   `_T("LastGastWater")` *and its length, `13`*, in a `_tcsnicmp` call. It does not
-   derive them from the macros. Get this wrong and "Edit Script" silently starts
-   treating the script's own windows as an editor window.
-3. **`source/ahkversion.cpp`** — `T_AHK_NAME_VERSION`, which forms the main window title
+2. **`source/ahkversion.cpp`** — `T_AHK_NAME_VERSION`, which forms the main window title
    via `Script::Init()`. This is the second argument to `FindWindow` in the
-   prior-instance check, so it must stay consistent with the class name.
+   prior-instance check, so it must stay consistent with the class name. It is
+   deliberately *not* derived from `WINDOW_CLASS_MAIN`: `defines.h` is not in the
+   precompiled header (see the commented-out include in `stdafx.h`), and
+   `ahkversion.cpp` is kept a minimal translation unit on purpose so that only it needs
+   recompiling when the git-describe version changes.
+
+`Script::Edit()` in `source/script.cpp` also filters on the class-name prefix, but it
+derives that prefix from `WINDOW_CLASS_MAIN` via
+`_tcsnicmp(class_name, WINDOW_CLASS_MAIN, _tcslen(WINDOW_CLASS_MAIN))`, so it follows a
+rename automatically. It relies on `WINDOW_CLASS_GUI` sharing `WINDOW_CLASS_MAIN`'s
+prefix — keep that true. (Upstream hardcoded the literal and its length here, which is
+exactly the sync hazard this avoids.)
 
 `GuiType::FindGui()` (`source/script_gui.cpp`) identifies our GUI windows by class
 **atom** (`GetClassLong(hwnd, GCW_ATOM)`), not by name, so it is rename-safe and needs

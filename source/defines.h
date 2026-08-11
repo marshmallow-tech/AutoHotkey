@@ -54,9 +54,10 @@ GNU General Public License for more details.
 // Renamed from "AutoHotkey"/"AutoHotkeyGUI" so this build's windows are addressable only by the
 // new name: FindWindow() with the old class name can no longer locate them, and neither can a
 // stock AutoHotkey build's prior-instance check (nor this build locate a stock instance).
-// If these are changed again, two other sites must be updated to match:
-//   - Script::Edit() in script.cpp, which hardcodes the shared prefix and its length.
-//   - T_AHK_NAME_VERSION in ahkversion.cpp, which forms the main window's title.
+// Script::Edit() in script.cpp derives its class-name prefix check from WINDOW_CLASS_MAIN, so it
+// follows automatically; but T_AHK_NAME_VERSION in ahkversion.cpp forms the main window's title,
+// which is the second FindWindow() argument in the prior-instance check, and must be renamed by
+// hand to match if these are ever changed again.
 #define WINDOW_CLASS_MAIN _T("LastGastWater")
 #define WINDOW_CLASS_GUI _T("LastGastWaterGUI") // There's a section in Script::Edit() that relies on these all starting with "LastGastWater".
 

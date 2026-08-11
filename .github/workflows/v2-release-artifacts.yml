@@ -81,9 +81,31 @@ jobs:
       - name: Build help file
         shell: pwsh
         run: |
-          & "$PWD\bin\AutoHotkey32.exe" "$PWD\externals\AutoHotkeyDocs\compile_chm.ahk"
-          if (!(Test-Path "$PWD\externals\AutoHotkeyDocs\AutoHotkey.chm")) {
-            throw "AutoHotkey.chm was not created."
+          $docs = Join-Path $PWD 'externals\AutoHotkeyDocs'
+
+          $hhc = @(
+            (Join-Path $env:ProgramFiles 'HTML Help Workshop\hhc.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'HTML Help Workshop\hhc.exe')
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $hhc) {
+            throw "hhc.exe not found; the HTML Help Workshop install did not provide it."
+          }
+          Write-Host "Using $hhc"
+
+          # compile_chm.ahk reads docs\static\source\data_index.js and writes Index.hhk using paths
+          # relative to the *working directory*, so it has to run from the docs checkout.  And
+          # AutoHotkey32.exe is a GUI-subsystem binary, which PowerShell's call operator does not
+          # wait for -- Start-Process -PassThru + WaitForExit is what makes this step synchronous.
+          # /ErrorStdOut keeps a script error on the log instead of in a modal dialog nobody can close.
+          $proc = Start-Process -FilePath "$PWD\bin\AutoHotkey32.exe" `
+            -ArgumentList @('/ErrorStdOut', "$docs\compile_chm.ahk") `
+            -WorkingDirectory $docs -NoNewWindow -PassThru
+          if (-not $proc.WaitForExit(600000)) {
+            $proc.Kill()
+            throw "compile_chm.ahk did not finish within 10 minutes."
+          }
+          if (!(Test-Path "$docs\AutoHotkey.chm")) {
+            throw "AutoHotkey.chm was not created (AutoHotkey exited with $($proc.ExitCode))."
           }
 
       - name: Stage release contents
@@ -111,9 +133,20 @@ jobs:
       - name: Generate installer payload
         shell: pwsh
         run: |
-          & "$PWD\bin\AutoHotkey32.exe" "$PWD\externals\AutoHotkey-Release\make-v2-setup.ahk" skip-compile
-          if (!(Test-Path "$PWD\externals\AutoHotkey-Release\include-v2\~FileInstall.ahk")) {
-            throw "Installer payload manifest was not created."
+          $release = Join-Path $PWD 'externals\AutoHotkey-Release'
+
+          # Same two constraints as the help-file step: make-v2-setup.ahk starts with
+          # SetWorkingDir "include-v2", which is resolved against the caller's working directory,
+          # and the process must be waited on because AutoHotkey32.exe is GUI-subsystem.
+          $proc = Start-Process -FilePath "$PWD\bin\AutoHotkey32.exe" `
+            -ArgumentList @('/ErrorStdOut', "$release\make-v2-setup.ahk", 'skip-compile') `
+            -WorkingDirectory $release -NoNewWindow -PassThru
+          if (-not $proc.WaitForExit(600000)) {
+            $proc.Kill()
+            throw "make-v2-setup.ahk did not finish within 10 minutes."
+          }
+          if (!(Test-Path "$release\include-v2\~FileInstall.ahk")) {
+            throw "Installer payload manifest was not created (AutoHotkey exited with $($proc.ExitCode))."
           }
 
       - name: Create dist directory

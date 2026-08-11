@@ -1,0 +1,162 @@
+name: v2 release artifacts
+
+on:
+  push:
+    branches:
+      - v2.0-marshmallow-dev
+  pull_request:
+    branches:
+      - v2.0-marshmallow-dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v2-release-artifacts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout docs
+        uses: actions/checkout@v4
+        with:
+          repository: AutoHotkey/AutoHotkeyDocs
+          ref: v2
+          path: externals/AutoHotkeyDocs
+
+      - name: Checkout UX assets
+        uses: actions/checkout@v4
+        with:
+          repository: AutoHotkey/AutoHotkeyUX
+          path: externals/AutoHotkeyUX
+
+      - name: Checkout packaging assets
+        uses: actions/checkout@v4
+        with:
+          repository: Lexikos/AutoHotkey-Release
+          path: externals/AutoHotkey-Release
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install HTML Help Workshop
+        shell: pwsh
+        run: choco install html-help-workshop --no-progress -y
+
+      - name: Compute artifact metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $describe = (git describe --tags --dirty --match "v*").Trim()
+          if (-not $describe) {
+            throw "Unable to derive a version from git describe."
+          }
+
+          $version = $describe.Substring(1)
+          $version = $version -replace '-(?=\d+-)', '+'
+          $version = $version -replace '-g', '+'
+          $version = $version -replace '-dirty$', '+dirty'
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "zip_name=AutoHotkey_${version}.zip" >> $env:GITHUB_OUTPUT
+          "setup_name=AutoHotkey_${version}_setup.exe" >> $env:GITHUB_OUTPUT
+
+      - name: Build Win32 release
+        shell: cmd
+        run: msbuild AutoHotkeyx.sln /m /t:Build /p:Configuration=Release /p:Platform=Win32
+
+      - name: Build x64 release
+        shell: cmd
+        run: msbuild AutoHotkeyx.sln /m /t:Build /p:Configuration=Release /p:Platform=x64
+
+      - name: Build help file
+        shell: pwsh
+        run: |
+          & "$PWD\bin\AutoHotkey32.exe" "$PWD\externals\AutoHotkeyDocs\compile_chm.ahk"
+          if (!(Test-Path "$PWD\externals\AutoHotkeyDocs\AutoHotkey.chm")) {
+            throw "AutoHotkey.chm was not created."
+          }
+
+      - name: Stage release contents
+        shell: pwsh
+        run: |
+          $stageRoot = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2'
+          $uxRoot = Join-Path $stageRoot 'UX'
+
+          Remove-Item $uxRoot -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot 'AutoHotkey32.exe') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot 'AutoHotkey64.exe') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot 'AutoHotkey.chm') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot '~FileInstall.ahk') -Force -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Path $uxRoot -Force | Out-Null
+
+          Copy-Item "$PWD\bin\AutoHotkey32.exe" $stageRoot -Force
+          Copy-Item "$PWD\bin\AutoHotkey64.exe" $stageRoot -Force
+          Copy-Item "$PWD\externals\AutoHotkeyDocs\AutoHotkey.chm" $stageRoot -Force
+          Copy-Item "$PWD\externals\AutoHotkeyUX\*.ahk" $uxRoot -Force
+          Copy-Item "$PWD\externals\AutoHotkeyUX\inc" (Join-Path $uxRoot 'inc') -Recurse -Force
+          Copy-Item "$PWD\externals\AutoHotkeyUX\Templates" (Join-Path $uxRoot 'Templates') -Recurse -Force
+          Copy-Item "$PWD\externals\AutoHotkey-Release\zip-files-v2.0.txt" "$PWD\externals\AutoHotkey-Release\zip-files-alpha.txt" -Force
+
+      - name: Generate installer payload
+        shell: pwsh
+        run: |
+          & "$PWD\bin\AutoHotkey32.exe" "$PWD\externals\AutoHotkey-Release\make-v2-setup.ahk" skip-compile
+          if (!(Test-Path "$PWD\externals\AutoHotkey-Release\include-v2\~FileInstall.ahk")) {
+            throw "Installer payload manifest was not created."
+          }
+
+      - name: Create dist directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Path "$PWD\dist" -Force | Out-Null
+
+      - name: Compile setup executable
+        uses: benmusson/ahk2exe-action@v1
+        with:
+          in: .\externals\AutoHotkey-Release\include-v2\AutoHotkey_setup.ahk
+          out: .\dist\${{ steps.meta.outputs.setup_name }}
+          target: x86
+          ahk-tag: latest
+
+      - name: Create zip artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "$PWD\dist" -Force | Out-Null
+          $stageRoot = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2'
+          $zipPath = Join-Path $PWD "dist\${{ steps.meta.outputs.zip_name }}"
+
+          Push-Location $stageRoot
+          try {
+            if (Test-Path $zipPath) {
+              Remove-Item $zipPath -Force
+            }
+            Compress-Archive -Path 'AutoHotkey32.exe', 'AutoHotkey64.exe', 'AutoHotkey.chm', 'WindowSpy.ahk', 'license.txt', 'Install.cmd', 'UX' -DestinationPath $zipPath -CompressionLevel Optimal
+          }
+          finally {
+            Pop-Location
+          }
+
+      - name: Verify packaged artifacts
+        shell: pwsh
+        run: |
+          Get-Item "$PWD\dist\${{ steps.meta.outputs.setup_name }}" | Out-Null
+          Get-Item "$PWD\dist\${{ steps.meta.outputs.zip_name }}" | Out-Null
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoHotkey-${{ steps.meta.outputs.version }}
+          path: |
+            dist/${{ steps.meta.outputs.setup_name }}
+            dist/${{ steps.meta.outputs.zip_name }}
+          if-no-files-found: error

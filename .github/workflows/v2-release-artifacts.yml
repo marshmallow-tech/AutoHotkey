@@ -160,6 +160,10 @@ jobs:
           out: .\dist\${{ steps.meta.outputs.setup_name }}
           target: x86
           ahk-tag: latest
+          # Resolving "latest" queries the GitHub API. Without a token those calls are
+          # unauthenticated and share the runner's IP quota, which is what made this step fail
+          # with "API rate limit exceeded"; GITHUB_TOKEN raises the limit to a per-repo quota.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create zip artifact
         shell: pwsh

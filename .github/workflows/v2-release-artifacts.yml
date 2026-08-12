@@ -1,0 +1,240 @@
+name: v2 release artifacts
+
+on:
+  push:
+    branches:
+      - v2.0-marshmallow-dev
+    tags:
+      # Release tags for this fork, e.g. v2.0.26-marshmallow. Pushing one builds and
+      # uploads the same zip/setup artifacts as a branch build, named after the tag.
+      - 'v2.0.*-marshmallow'
+  pull_request:
+    branches:
+      - v2.0-marshmallow-dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v2-release-artifacts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: windows-2022
+
+    # Overrides the workflow-wide contents: read above. Needed only so a tag build can
+    # publish a GitHub Release; branch and pull_request builds never reach that step.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout docs
+        uses: actions/checkout@v4
+        with:
+          repository: AutoHotkey/AutoHotkeyDocs
+          ref: v2
+          path: externals/AutoHotkeyDocs
+
+      - name: Checkout UX assets
+        uses: actions/checkout@v4
+        with:
+          repository: AutoHotkey/AutoHotkeyUX
+          path: externals/AutoHotkeyUX
+
+      - name: Checkout packaging assets
+        uses: actions/checkout@v4
+        with:
+          repository: Lexikos/AutoHotkey-Release
+          path: externals/AutoHotkey-Release
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install HTML Help Workshop
+        shell: pwsh
+        run: choco install html-help-workshop --no-progress -y
+
+      - name: Compute artifact metadata
+        id: meta
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            # Name a tag build after the tag that triggered it. git describe is not safe here:
+            # when several tags point at the same commit it may pick any one of them, which
+            # would silently drop the -marshmallow suffix from the artifact names.
+            $describe = $env:GITHUB_REF_NAME
+          } else {
+            $describe = (git describe --tags --dirty --match "v*").Trim()
+          }
+          if (-not $describe) {
+            throw "Unable to derive a version from git describe."
+          }
+          Write-Host "Building version from: $describe"
+
+          $version = $describe.Substring(1)
+          $version = $version -replace '-(?=\d+-)', '+'
+          $version = $version -replace '-g', '+'
+          $version = $version -replace '-dirty$', '+dirty'
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "zip_name=AutoHotkey_${version}.zip" >> $env:GITHUB_OUTPUT
+          "setup_name=AutoHotkey_${version}_setup.exe" >> $env:GITHUB_OUTPUT
+
+      - name: Build Win32 release
+        shell: cmd
+        run: msbuild AutoHotkeyx.sln /m /t:Build /p:Configuration=Release /p:Platform=Win32
+
+      - name: Build x64 release
+        shell: cmd
+        run: msbuild AutoHotkeyx.sln /m /t:Build /p:Configuration=Release /p:Platform=x64
+
+      - name: Build help file
+        shell: pwsh
+        run: |
+          $docs = Join-Path $PWD 'externals\AutoHotkeyDocs'
+
+          $hhc = @(
+            (Join-Path $env:ProgramFiles 'HTML Help Workshop\hhc.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'HTML Help Workshop\hhc.exe')
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $hhc) {
+            throw "hhc.exe not found; the HTML Help Workshop install did not provide it."
+          }
+          Write-Host "Using $hhc"
+
+          # compile_chm.ahk reads docs\static\source\data_index.js and writes Index.hhk using paths
+          # relative to the *working directory*, so it has to run from the docs checkout.  And
+          # AutoHotkey32.exe is a GUI-subsystem binary, which PowerShell's call operator does not
+          # wait for -- Start-Process -PassThru + WaitForExit is what makes this step synchronous.
+          # /ErrorStdOut keeps a script error on the log instead of in a modal dialog nobody can close.
+          $proc = Start-Process -FilePath "$PWD\bin\AutoHotkey32.exe" `
+            -ArgumentList @('/ErrorStdOut', "$docs\compile_chm.ahk") `
+            -WorkingDirectory $docs -NoNewWindow -PassThru
+          if (-not $proc.WaitForExit(600000)) {
+            $proc.Kill()
+            throw "compile_chm.ahk did not finish within 10 minutes."
+          }
+          if (!(Test-Path "$docs\AutoHotkey.chm")) {
+            throw "AutoHotkey.chm was not created (AutoHotkey exited with $($proc.ExitCode))."
+          }
+
+      - name: Stage release contents
+        shell: pwsh
+        run: |
+          $stageRoot = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2'
+          $uxRoot = Join-Path $stageRoot 'UX'
+
+          Remove-Item $uxRoot -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot 'AutoHotkey32.exe') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot 'AutoHotkey64.exe') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot 'AutoHotkey.chm') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot '~FileInstall.ahk') -Force -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Path $uxRoot -Force | Out-Null
+
+          Copy-Item "$PWD\bin\AutoHotkey32.exe" $stageRoot -Force
+          Copy-Item "$PWD\bin\AutoHotkey64.exe" $stageRoot -Force
+          Copy-Item "$PWD\externals\AutoHotkeyDocs\AutoHotkey.chm" $stageRoot -Force
+          Copy-Item "$PWD\externals\AutoHotkeyUX\*.ahk" $uxRoot -Force
+          Copy-Item "$PWD\externals\AutoHotkeyUX\inc" (Join-Path $uxRoot 'inc') -Recurse -Force
+          Copy-Item "$PWD\externals\AutoHotkeyUX\Templates" (Join-Path $uxRoot 'Templates') -Recurse -Force
+          Copy-Item "$PWD\externals\AutoHotkey-Release\zip-files-v2.0.txt" "$PWD\externals\AutoHotkey-Release\zip-files-alpha.txt" -Force
+
+      - name: Generate installer payload
+        shell: pwsh
+        run: |
+          $release = Join-Path $PWD 'externals\AutoHotkey-Release'
+
+          # Same two constraints as the help-file step: make-v2-setup.ahk starts with
+          # SetWorkingDir "include-v2", which is resolved against the caller's working directory,
+          # and the process must be waited on because AutoHotkey32.exe is GUI-subsystem.
+          $proc = Start-Process -FilePath "$PWD\bin\AutoHotkey32.exe" `
+            -ArgumentList @('/ErrorStdOut', "$release\make-v2-setup.ahk", 'skip-compile') `
+            -WorkingDirectory $release -NoNewWindow -PassThru
+          if (-not $proc.WaitForExit(600000)) {
+            $proc.Kill()
+            throw "make-v2-setup.ahk did not finish within 10 minutes."
+          }
+          if (!(Test-Path "$release\include-v2\~FileInstall.ahk")) {
+            throw "Installer payload manifest was not created (AutoHotkey exited with $($proc.ExitCode))."
+          }
+
+      - name: Create dist directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Path "$PWD\dist" -Force | Out-Null
+
+      - name: Compile setup executable
+        uses: benmusson/ahk2exe-action@v1
+        with:
+          in: .\externals\AutoHotkey-Release\include-v2\AutoHotkey_setup.ahk
+          out: .\dist\${{ steps.meta.outputs.setup_name }}
+          target: x86
+          ahk-tag: latest
+          # Resolving "latest" queries the GitHub API. Without a token those calls are
+          # unauthenticated and share the runner's IP quota, which is what made this step fail
+          # with "API rate limit exceeded"; GITHUB_TOKEN raises the limit to a per-repo quota.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create zip artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "$PWD\dist" -Force | Out-Null
+          $stageRoot = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2'
+          $zipPath = Join-Path $PWD "dist\${{ steps.meta.outputs.zip_name }}"
+
+          Push-Location $stageRoot
+          try {
+            if (Test-Path $zipPath) {
+              Remove-Item $zipPath -Force
+            }
+            Compress-Archive -Path 'AutoHotkey32.exe', 'AutoHotkey64.exe', 'AutoHotkey.chm', 'WindowSpy.ahk', 'license.txt', 'Install.cmd', 'UX' -DestinationPath $zipPath -CompressionLevel Optimal
+          }
+          finally {
+            Pop-Location
+          }
+
+      - name: Verify packaged artifacts
+        shell: pwsh
+        run: |
+          Get-Item "$PWD\dist\${{ steps.meta.outputs.setup_name }}" | Out-Null
+          Get-Item "$PWD\dist\${{ steps.meta.outputs.zip_name }}" | Out-Null
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoHotkey-${{ steps.meta.outputs.version }}
+          path: |
+            dist/${{ steps.meta.outputs.setup_name }}
+            dist/${{ steps.meta.outputs.zip_name }}
+          if-no-files-found: error
+
+      # Workflow artifacts above expire (90 days by default), so a tag build also publishes
+      # a GitHub Release, which keeps the zip and installer permanently downloadable.
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $zip = "dist/${{ steps.meta.outputs.zip_name }}"
+          $setup = "dist/${{ steps.meta.outputs.setup_name }}"
+
+          # Idempotent, so re-running a tag build refreshes the assets instead of failing.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --verify-tag --title $tag --notes "Automated build of $tag."
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed for $tag." }
+          } else {
+            Write-Host "Release $tag already exists; updating its assets."
+          }
+
+          gh release upload $tag $zip $setup --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $tag." }

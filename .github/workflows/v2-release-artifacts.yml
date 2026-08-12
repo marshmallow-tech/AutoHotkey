@@ -190,6 +190,8 @@ jobs:
           New-Item -ItemType Directory -Path $tools -Force | Out-Null
 
           function Save-Asset([string]$Url, [string]$Dest) {
+            # Fail loudly on a missing URL rather than retrying an empty request four times.
+            if ([string]::IsNullOrWhiteSpace($Url)) { throw "No download URL resolved for '$Dest'." }
             for ($i = 1; $i -le 4; $i++) {
               try {
                 Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
@@ -204,13 +206,12 @@ jobs:
           }
 
           # gh is authenticated, so the release lookup uses the per-repo API quota.
-          $lines = gh api repos/AutoHotkey/Ahk2Exe/releases/latest --jq '.assets[] | "\(.name)`t\(.browser_download_url)"'
+          $json = gh api repos/AutoHotkey/Ahk2Exe/releases/latest
           if ($LASTEXITCODE -ne 0) { throw "Could not query the Ahk2Exe release." }
           $assets = @{}
-          foreach ($line in @($lines)) {
-            $name, $url = $line -split "`t", 2
-            $assets[$name] = $url
-          }
+          foreach ($a in ($json | ConvertFrom-Json).assets) { $assets[$a.name] = $a.browser_download_url }
+          if ($assets.Count -eq 0) { throw "The Ahk2Exe release publishes no assets." }
+          Write-Host "Ahk2Exe release assets: $($assets.Keys -join ', ')"
 
           $zips = @($assets.Keys | Where-Object { $_ -like '*.zip' })
           if ($zips.Count -eq 0) { throw "The Ahk2Exe release has no .zip asset." }

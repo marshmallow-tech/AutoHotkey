@@ -1009,7 +1009,9 @@ ResultType Script::Edit()
 	{
 		TCHAR class_name[32];
 		GetClassName(hwnd, class_name, _countof(class_name));
-		if (!_tcscmp(class_name, _T("#32770")) || !_tcsnicmp(class_name, _T("AutoHotkey"), 10)) // MessageBox(), InputBox(), FileSelectFile(), or GUI/script-owned window.
+		// WINDOW_CLASS_SPLASH and WINDOW_CLASS_GUI share WINDOW_CLASS_MAIN's prefix, so matching that
+		// prefix covers all three; deriving it from the define keeps this correct across a rename.
+		if (!_tcscmp(class_name, _T("#32770")) || !_tcsnicmp(class_name, WINDOW_CLASS_MAIN, _tcslen(WINDOW_CLASS_MAIN))) // MessageBox(), InputBox(), FileSelectFile(), or GUI/script-owned window.
 			hwnd = NULL;  // Exclude it from consideration.
 	}
 	if (hwnd)  // File appears to already be open for editing, so use the current window.

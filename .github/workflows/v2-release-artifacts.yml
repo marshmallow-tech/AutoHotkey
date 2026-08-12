@@ -208,10 +208,12 @@ jobs:
           # gh is authenticated, so the release lookup uses the per-repo API quota.
           $json = gh api repos/AutoHotkey/Ahk2Exe/releases/latest
           if ($LASTEXITCODE -ne 0) { throw "Could not query the Ahk2Exe release." }
+          $release = $json | ConvertFrom-Json
+          $tag = $release.tag_name
           $assets = @{}
-          foreach ($a in ($json | ConvertFrom-Json).assets) { $assets[$a.name] = $a.browser_download_url }
+          foreach ($a in $release.assets) { $assets[$a.name] = $a.browser_download_url }
           if ($assets.Count -eq 0) { throw "The Ahk2Exe release publishes no assets." }
-          Write-Host "Ahk2Exe release assets: $($assets.Keys -join ', ')"
+          Write-Host "Ahk2Exe $tag assets: $($assets.Keys -join ', ')"
 
           $zips = @($assets.Keys | Where-Object { $_ -like '*.zip' })
           if ($zips.Count -eq 0) { throw "The Ahk2Exe release has no .zip asset." }
@@ -228,9 +230,11 @@ jobs:
           # BinMod.exe backs the ;@Ahk2Exe-SetName/SetVersion/SetDescription directives in
           # AutoHotkey_setup.ahk. BinMod.ahk is a v1 script, so it compiles onto Ahk2Exe.exe
           # (itself v1) -- not onto our v2 base.
-          if (-not $assets.ContainsKey('BinMod.ahk')) { throw "BinMod.ahk is not published on the Ahk2Exe release." }
+          # BinMod.ahk is not a release asset -- it lives in the Ahk2Exe source tree, so it is read
+          # from raw.githubusercontent at the release tag, which is what the action did too.
           $binModSrc = Join-Path $tools 'BinMod.ahk'
-          Save-Asset $assets['BinMod.ahk'] $binModSrc
+          Save-Asset "https://raw.githubusercontent.com/AutoHotkey/Ahk2Exe/refs/tags/$tag/BinMod.ahk" $binModSrc
+          if ((Get-Item $binModSrc).Length -eq 0) { throw "Downloaded BinMod.ahk is empty." }
           $binModExe = Join-Path (Split-Path $ahk2exe.FullName -Parent) 'BinMod.exe'
           $p = Start-Process -FilePath $ahk2exe.FullName -NoNewWindow -Wait -PassThru -ArgumentList @(
             '/silent', 'verbose', '/in', $binModSrc, '/out', $binModExe, '/base', $ahk2exe.FullName, '/compress', '0')

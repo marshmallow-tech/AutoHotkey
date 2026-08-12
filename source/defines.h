@@ -37,7 +37,11 @@ GNU General Public License for more details.
 
 #define T_AHK_NAME			_T(AHK_NAME)
 #define T_AHK_VERSION		_T(AHK_VERSION)
-#define T_AHK_NAME_VERSION	T_AHK_NAME _T(" v") T_AHK_VERSION
+// Deliberately not T_AHK_NAME: this forms the main window's title (see Script::Init()), which is
+// the second argument of the FindWindow() prior-instance check, so it carries the same renamed
+// identity as WINDOW_CLASS_MAIN below.  AHK_NAME itself stays "AutoHotkey" because it also feeds
+// the DBGp appid/language name (Debugger.h), the #Requires error message and the tray tip.
+#define T_AHK_NAME_VERSION	_T("LastGastWater") _T(" v") T_AHK_VERSION
 
 #ifdef AUTOHOTKEYSC
 #define SCRIPT_RESOURCE_NAME _T(">AUTOHOTKEY SCRIPT<")
@@ -56,9 +60,14 @@ GNU General Public License for more details.
 // MSDN: "Because window classes are process specific, window class names need to be unique only within
 // the same process. Also, because class names occupy space in the system's private atom table, you
 // should keep class name strings as short a possible:
-#define WINDOW_CLASS_MAIN _T("AutoHotkey")
-#define WINDOW_CLASS_SPLASH _T("AutoHotkey2")
-#define WINDOW_CLASS_GUI _T("AutoHotkeyGUI") // There's a section in Script::Edit() that relies on these all starting with "AutoHotkey".
+// Renamed from "AutoHotkey"/"AutoHotkey2"/"AutoHotkeyGUI" so this build's windows are addressable
+// only by the new name, matching the same rename on the v2.0 line.  Script::Edit() derives its
+// class-name prefix check from WINDOW_CLASS_MAIN, so it follows automatically, but
+// T_AHK_NAME_VERSION above forms the main window's title -- the second FindWindow() argument in
+// the prior-instance check -- and must be kept in sync by hand if these are changed again.
+#define WINDOW_CLASS_MAIN _T("LastGastWater")
+#define WINDOW_CLASS_SPLASH _T("LastGastWater2")
+#define WINDOW_CLASS_GUI _T("LastGastWaterGUI") // There's a section in Script::Edit() that relies on these all starting with "LastGastWater".
 
 #define EXT_AUTOHOTKEY _T(".ahk")
 #define AHK_HELP_FILE _T("AutoHotkey.chm")

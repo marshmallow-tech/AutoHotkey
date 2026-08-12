@@ -170,17 +170,83 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Path "$PWD\dist" -Force | Out-Null
 
+      # Ahk2Exe embeds the script into a base executable, so the base becomes the installer's
+      # own runtime. It must be the AutoHotkey we just built -- AutoHotkey_setup.ahk asks for
+      # exactly that with ";@Ahk2Exe-Base %A_ScriptDir%\AutoHotkey32.exe" -- otherwise the
+      # installer ships as a stock AutoHotkey binary carrying upstream's window identity.
+      #
+      # This replaces benmusson/ahk2exe-action, which always downloaded the official
+      # AutoHotkey release purely to supply that base and passed it as an explicit /base,
+      # overriding the directive. That download was redundant (we build the base ourselves)
+      # and was the source of two failures: an API rate limit, and a WebClient transport error.
+      # Only the compiler itself is still fetched from upstream, with retries.
       - name: Compile setup executable
-        uses: benmusson/ahk2exe-action@v1
-        with:
-          in: .\externals\AutoHotkey-Release\include-v2\AutoHotkey_setup.ahk
-          out: .\dist\${{ steps.meta.outputs.setup_name }}
-          target: x86
-          ahk-tag: latest
-          # Resolving "latest" queries the GitHub API. Without a token those calls are
-          # unauthenticated and share the runner's IP quota, which is what made this step fail
-          # with "API rate limit exceeded"; GITHUB_TOKEN raises the limit to a per-repo quota.
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $PWD '.ahk2exe'
+          New-Item -ItemType Directory -Path $tools -Force | Out-Null
+
+          function Save-Asset([string]$Url, [string]$Dest) {
+            for ($i = 1; $i -le 4; $i++) {
+              try {
+                Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+                return
+              } catch {
+                if ($i -eq 4) { throw "Download failed after 4 attempts: $Url`n$($_.Exception.Message)" }
+                $wait = [math]::Pow(2, $i)
+                Write-Host "Attempt $i failed ($($_.Exception.Message)); retrying in $wait s"
+                Start-Sleep -Seconds $wait
+              }
+            }
+          }
+
+          # gh is authenticated, so the release lookup uses the per-repo API quota.
+          $lines = gh api repos/AutoHotkey/Ahk2Exe/releases/latest --jq '.assets[] | "\(.name)`t\(.browser_download_url)"'
+          if ($LASTEXITCODE -ne 0) { throw "Could not query the Ahk2Exe release." }
+          $assets = @{}
+          foreach ($line in @($lines)) {
+            $name, $url = $line -split "`t", 2
+            $assets[$name] = $url
+          }
+
+          $zips = @($assets.Keys | Where-Object { $_ -like '*.zip' })
+          if ($zips.Count -eq 0) { throw "The Ahk2Exe release has no .zip asset." }
+          foreach ($zip in $zips) {
+            $path = Join-Path $tools $zip
+            Save-Asset $assets[$zip] $path
+            Expand-Archive -Path $path -DestinationPath $tools -Force
+          }
+
+          $ahk2exe = Get-ChildItem -Path $tools -Recurse -Filter 'Ahk2Exe.exe' | Select-Object -First 1
+          if (-not $ahk2exe) { throw "Ahk2Exe.exe was not found in the Ahk2Exe release assets." }
+          Write-Host "Ahk2Exe: $($ahk2exe.FullName)"
+
+          # BinMod.exe backs the ;@Ahk2Exe-SetName/SetVersion/SetDescription directives in
+          # AutoHotkey_setup.ahk. BinMod.ahk is a v1 script, so it compiles onto Ahk2Exe.exe
+          # (itself v1) -- not onto our v2 base.
+          if (-not $assets.ContainsKey('BinMod.ahk')) { throw "BinMod.ahk is not published on the Ahk2Exe release." }
+          $binModSrc = Join-Path $tools 'BinMod.ahk'
+          Save-Asset $assets['BinMod.ahk'] $binModSrc
+          $binModExe = Join-Path (Split-Path $ahk2exe.FullName -Parent) 'BinMod.exe'
+          $p = Start-Process -FilePath $ahk2exe.FullName -NoNewWindow -Wait -PassThru -ArgumentList @(
+            '/silent', 'verbose', '/in', $binModSrc, '/out', $binModExe, '/base', $ahk2exe.FullName, '/compress', '0')
+          if ($p.ExitCode -ne 0 -or !(Test-Path $binModExe)) {
+            throw "Failed to build BinMod.exe (Ahk2Exe exited with $($p.ExitCode))."
+          }
+
+          $base = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2\AutoHotkey32.exe'
+          $in = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2\AutoHotkey_setup.ahk'
+          $out = Join-Path $PWD 'dist\${{ steps.meta.outputs.setup_name }}'
+          if (!(Test-Path $base)) { throw "Base file not found (staging step should have copied it): $base" }
+          Write-Host "Compiling $in onto our own base $base"
+
+          $p = Start-Process -FilePath $ahk2exe.FullName -NoNewWindow -Wait -PassThru -ArgumentList @(
+            '/silent', 'verbose', '/in', $in, '/out', $out, '/base', $base, '/compress', '0')
+          if ($p.ExitCode -ne 0) { throw "Ahk2Exe failed (exit $($p.ExitCode))." }
+          if (!(Test-Path $out)) { throw "Setup executable was not produced: $out" }
 
       - name: Create zip artifact
         shell: pwsh

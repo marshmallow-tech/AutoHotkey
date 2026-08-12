@@ -24,6 +24,11 @@ jobs:
   package:
     runs-on: windows-2022
 
+    # Overrides the workflow-wide contents: read above. Needed only so a tag build can
+    # publish a GitHub Release; branch and pull_request builds never reach that step.
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -209,3 +214,27 @@ jobs:
             dist/${{ steps.meta.outputs.setup_name }}
             dist/${{ steps.meta.outputs.zip_name }}
           if-no-files-found: error
+
+      # Workflow artifacts above expire (90 days by default), so a tag build also publishes
+      # a GitHub Release, which keeps the zip and installer permanently downloadable.
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $zip = "dist/${{ steps.meta.outputs.zip_name }}"
+          $setup = "dist/${{ steps.meta.outputs.setup_name }}"
+
+          # Idempotent, so re-running a tag build refreshes the assets instead of failing.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --verify-tag --title $tag --notes "Automated build of $tag."
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed for $tag." }
+          } else {
+            Write-Host "Release $tag already exists; updating its assets."
+          }
+
+          gh release upload $tag $zip $setup --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $tag." }

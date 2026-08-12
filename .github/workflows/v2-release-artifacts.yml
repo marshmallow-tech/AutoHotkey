@@ -54,6 +54,22 @@ jobs:
           repository: Lexikos/AutoHotkey-Release
           path: externals/AutoHotkey-Release
 
+      # Ahk2Exe is an AutoHotkey v1.1 script, so it cannot run on the v2 binaries built here --
+      # it needs a v1.1 32-bit Unicode base. Our v1.1 line carries the same window-class rename,
+      # so building it is what lets the shipped compiler have this fork's identity too.
+      - name: Checkout v1.1 source
+        uses: actions/checkout@v4
+        with:
+          ref: v1.1-marshmallow-dev
+          path: externals/AutoHotkey-v1.1
+
+      - name: Checkout Ahk2Exe source
+        uses: actions/checkout@v4
+        with:
+          repository: AutoHotkey/Ahk2Exe
+          fetch-depth: 0
+          path: externals/Ahk2Exe
+
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
 
@@ -94,6 +110,90 @@ jobs:
       - name: Build x64 release
         shell: cmd
         run: msbuild AutoHotkeyx.sln /m /t:Build /p:Configuration=Release /p:Platform=x64
+
+      # Produces externals\AutoHotkey-v1.1\bin\AutoHotkeyU32.exe, the base Ahk2Exe is compiled
+      # onto. Release|Win32 is the Unicode configuration -- the "(mbcs)" ones are ANSI, and the
+      # U/A suffix in the target name follows CharacterSet.
+      - name: Build v1.1 Unicode 32-bit release
+        shell: cmd
+        run: msbuild externals\AutoHotkey-v1.1\AutoHotkeyx.sln /m /t:Build /p:Configuration=Release /p:Platform=Win32
+
+      # Ahk2Exe is needed twice below: to compile the installer, and to compile Ahk2Exe itself
+      # from source. It cannot be built from scratch -- per its README it "must be compiled with
+      # itself" -- so one prebuilt copy is bootstrapped from upstream here. Every *base* file used
+      # afterwards is one we built. Downloads are retried; a transport failure here has broken CI.
+      - name: Install Ahk2Exe toolchain
+        id: toolchain
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $PWD '.ahk2exe'
+          New-Item -ItemType Directory -Path $tools -Force | Out-Null
+
+          function Save-Asset([string]$Url, [string]$Dest) {
+            # Fail loudly on a missing URL rather than retrying an empty request four times.
+            if ([string]::IsNullOrWhiteSpace($Url)) { throw "No download URL resolved for '$Dest'." }
+            for ($i = 1; $i -le 4; $i++) {
+              try {
+                Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+                return
+              } catch {
+                if ($i -eq 4) { throw "Download failed after 4 attempts: $Url`n$($_.Exception.Message)" }
+                $wait = [math]::Pow(2, $i)
+                Write-Host "Attempt $i failed ($($_.Exception.Message)); retrying in $wait s"
+                Start-Sleep -Seconds $wait
+              }
+            }
+          }
+
+          # gh is authenticated, so the release lookup uses the per-repo API quota.
+          $json = gh api repos/AutoHotkey/Ahk2Exe/releases/latest
+          if ($LASTEXITCODE -ne 0) { throw "Could not query the Ahk2Exe release." }
+          $release = $json | ConvertFrom-Json
+          $tag = $release.tag_name
+          $assets = @{}
+          foreach ($a in $release.assets) { $assets[$a.name] = $a.browser_download_url }
+          if ($assets.Count -eq 0) { throw "The Ahk2Exe release publishes no assets." }
+          Write-Host "Ahk2Exe $tag assets: $($assets.Keys -join ', ')"
+
+          $zips = @($assets.Keys | Where-Object { $_ -like '*.zip' })
+          if ($zips.Count -eq 0) { throw "The Ahk2Exe release has no .zip asset." }
+          foreach ($zip in $zips) {
+            $path = Join-Path $tools $zip
+            Save-Asset $assets[$zip] $path
+            Expand-Archive -Path $path -DestinationPath $tools -Force
+          }
+
+          $ahk2exe = Get-ChildItem -Path $tools -Recurse -Filter 'Ahk2Exe.exe' | Select-Object -First 1
+          if (-not $ahk2exe) { throw "Ahk2Exe.exe was not found in the Ahk2Exe release assets." }
+          Write-Host "Ahk2Exe: $($ahk2exe.FullName)"
+          $toolDir = Split-Path $ahk2exe.FullName -Parent
+
+          # BinMod.exe backs the ;@Ahk2Exe-Set* directives used by both scripts compiled below.
+          # It is not a release asset -- it lives in the Ahk2Exe source tree, so it is read at the
+          # release tag. BinMod.ahk is a v1 script, so it compiles onto Ahk2Exe.exe (itself v1).
+          $binModSrc = Join-Path $tools 'BinMod.ahk'
+          Save-Asset "https://raw.githubusercontent.com/AutoHotkey/Ahk2Exe/refs/tags/$tag/BinMod.ahk" $binModSrc
+          if ((Get-Item $binModSrc).Length -eq 0) { throw "Downloaded BinMod.ahk is empty." }
+          $binModExe = Join-Path $toolDir 'BinMod.exe'
+          $p = Start-Process -FilePath $ahk2exe.FullName -NoNewWindow -Wait -PassThru -ArgumentList @(
+            '/silent', 'verbose', '/in', $binModSrc, '/out', $binModExe, '/base', $ahk2exe.FullName, '/compress', '0')
+          if ($p.ExitCode -ne 0 -or !(Test-Path $binModExe)) {
+            throw "Failed to build BinMod.exe (Ahk2Exe exited with $($p.ExitCode))."
+          }
+
+          # Ahk2Exe.ahk carries ";@Ahk2Exe-Base %A_AhkPath%\..\AutoHotkeyU32.exe". For a compiled
+          # v1 script with no AutoHotkey installed, A_AhkPath resolves beside the running exe, so
+          # placing our v1.1 build next to Ahk2Exe.exe makes that directive and the explicit /base
+          # below name the same file -- no reliance on which of the two wins.
+          $u32 = Join-Path $PWD 'externals\AutoHotkey-v1.1\bin\AutoHotkeyU32.exe'
+          if (!(Test-Path $u32)) { throw "v1.1 base not found (the v1.1 build should have produced it): $u32" }
+          Copy-Item $u32 (Join-Path $toolDir 'AutoHotkeyU32.exe') -Force
+
+          "ahk2exe=$($ahk2exe.FullName)" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Build help file
         shell: pwsh
@@ -145,7 +245,37 @@ jobs:
           Copy-Item "$PWD\externals\AutoHotkeyUX\*.ahk" $uxRoot -Force
           Copy-Item "$PWD\externals\AutoHotkeyUX\inc" (Join-Path $uxRoot 'inc') -Recurse -Force
           Copy-Item "$PWD\externals\AutoHotkeyUX\Templates" (Join-Path $uxRoot 'Templates') -Recurse -Force
+          # Compiler\ is appended so make-v2-setup.ahk emits FileInstall lines for the Ahk2Exe
+          # built below; the upstream list predates us shipping a compiler.
           Copy-Item "$PWD\externals\AutoHotkey-Release\zip-files-v2.0.txt" "$PWD\externals\AutoHotkey-Release\zip-files-alpha.txt" -Force
+          Add-Content "$PWD\externals\AutoHotkey-Release\zip-files-alpha.txt" "Compiler"
+
+      # Compiles Ahk2Exe onto our own v1.1 build, so the shipped compiler carries this fork's
+      # window identity rather than stock AutoHotkey's. This must run before the installer payload
+      # is generated, because that step scans include-v2 to build its FileInstall manifest.
+      - name: Build Ahk2Exe from source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ahk2exe = '${{ steps.toolchain.outputs.ahk2exe }}'
+          $src = Join-Path $PWD 'externals\Ahk2Exe'
+          $u32 = Join-Path $PWD 'externals\AutoHotkey-v1.1\bin\AutoHotkeyU32.exe'
+
+          # "Must be compiled with itself (same version)" -- pin the source to the same tag the
+          # bootstrap compiler came from, rather than whatever master happens to be.
+          git -C $src checkout --quiet '${{ steps.toolchain.outputs.tag }}'
+          if ($LASTEXITCODE -ne 0) { throw "Could not check out Ahk2Exe at tag ${{ steps.toolchain.outputs.tag }}." }
+
+          $compilerDir = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2\Compiler'
+          New-Item -ItemType Directory -Path $compilerDir -Force | Out-Null
+          $out = Join-Path $compilerDir 'Ahk2Exe.exe'
+
+          Write-Host "Compiling Ahk2Exe.ahk onto our v1.1 base $u32"
+          $p = Start-Process -FilePath $ahk2exe -NoNewWindow -Wait -PassThru -ArgumentList @(
+            '/silent', 'verbose', '/in', (Join-Path $src 'Ahk2Exe.ahk'), '/out', $out, '/base', $u32, '/compress', '0')
+          if ($p.ExitCode -ne 0) { throw "Ahk2Exe failed to compile itself (exit $($p.ExitCode))." }
+          if (!(Test-Path $out)) { throw "Ahk2Exe.exe was not produced: $out" }
+          Write-Host "Built $out ($((Get-Item $out).Length) bytes)"
 
       - name: Generate installer payload
         shell: pwsh
@@ -174,81 +304,18 @@ jobs:
       # own runtime. It must be the AutoHotkey we just built -- AutoHotkey_setup.ahk asks for
       # exactly that with ";@Ahk2Exe-Base %A_ScriptDir%\AutoHotkey32.exe" -- otherwise the
       # installer ships as a stock AutoHotkey binary carrying upstream's window identity.
-      #
-      # This replaces benmusson/ahk2exe-action, which always downloaded the official
-      # AutoHotkey release purely to supply that base and passed it as an explicit /base,
-      # overriding the directive. That download was redundant (we build the base ourselves)
-      # and was the source of two failures: an API rate limit, and a WebClient transport error.
-      # Only the compiler itself is still fetched from upstream, with retries.
       - name: Compile setup executable
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $tools = Join-Path $PWD '.ahk2exe'
-          New-Item -ItemType Directory -Path $tools -Force | Out-Null
-
-          function Save-Asset([string]$Url, [string]$Dest) {
-            # Fail loudly on a missing URL rather than retrying an empty request four times.
-            if ([string]::IsNullOrWhiteSpace($Url)) { throw "No download URL resolved for '$Dest'." }
-            for ($i = 1; $i -le 4; $i++) {
-              try {
-                Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
-                return
-              } catch {
-                if ($i -eq 4) { throw "Download failed after 4 attempts: $Url`n$($_.Exception.Message)" }
-                $wait = [math]::Pow(2, $i)
-                Write-Host "Attempt $i failed ($($_.Exception.Message)); retrying in $wait s"
-                Start-Sleep -Seconds $wait
-              }
-            }
-          }
-
-          # gh is authenticated, so the release lookup uses the per-repo API quota.
-          $json = gh api repos/AutoHotkey/Ahk2Exe/releases/latest
-          if ($LASTEXITCODE -ne 0) { throw "Could not query the Ahk2Exe release." }
-          $release = $json | ConvertFrom-Json
-          $tag = $release.tag_name
-          $assets = @{}
-          foreach ($a in $release.assets) { $assets[$a.name] = $a.browser_download_url }
-          if ($assets.Count -eq 0) { throw "The Ahk2Exe release publishes no assets." }
-          Write-Host "Ahk2Exe $tag assets: $($assets.Keys -join ', ')"
-
-          $zips = @($assets.Keys | Where-Object { $_ -like '*.zip' })
-          if ($zips.Count -eq 0) { throw "The Ahk2Exe release has no .zip asset." }
-          foreach ($zip in $zips) {
-            $path = Join-Path $tools $zip
-            Save-Asset $assets[$zip] $path
-            Expand-Archive -Path $path -DestinationPath $tools -Force
-          }
-
-          $ahk2exe = Get-ChildItem -Path $tools -Recurse -Filter 'Ahk2Exe.exe' | Select-Object -First 1
-          if (-not $ahk2exe) { throw "Ahk2Exe.exe was not found in the Ahk2Exe release assets." }
-          Write-Host "Ahk2Exe: $($ahk2exe.FullName)"
-
-          # BinMod.exe backs the ;@Ahk2Exe-SetName/SetVersion/SetDescription directives in
-          # AutoHotkey_setup.ahk. BinMod.ahk is a v1 script, so it compiles onto Ahk2Exe.exe
-          # (itself v1) -- not onto our v2 base.
-          # BinMod.ahk is not a release asset -- it lives in the Ahk2Exe source tree, so it is read
-          # from raw.githubusercontent at the release tag, which is what the action did too.
-          $binModSrc = Join-Path $tools 'BinMod.ahk'
-          Save-Asset "https://raw.githubusercontent.com/AutoHotkey/Ahk2Exe/refs/tags/$tag/BinMod.ahk" $binModSrc
-          if ((Get-Item $binModSrc).Length -eq 0) { throw "Downloaded BinMod.ahk is empty." }
-          $binModExe = Join-Path (Split-Path $ahk2exe.FullName -Parent) 'BinMod.exe'
-          $p = Start-Process -FilePath $ahk2exe.FullName -NoNewWindow -Wait -PassThru -ArgumentList @(
-            '/silent', 'verbose', '/in', $binModSrc, '/out', $binModExe, '/base', $ahk2exe.FullName, '/compress', '0')
-          if ($p.ExitCode -ne 0 -or !(Test-Path $binModExe)) {
-            throw "Failed to build BinMod.exe (Ahk2Exe exited with $($p.ExitCode))."
-          }
-
+          $ahk2exe = '${{ steps.toolchain.outputs.ahk2exe }}'
           $base = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2\AutoHotkey32.exe'
           $in = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2\AutoHotkey_setup.ahk'
           $out = Join-Path $PWD 'dist\${{ steps.meta.outputs.setup_name }}'
           if (!(Test-Path $base)) { throw "Base file not found (staging step should have copied it): $base" }
           Write-Host "Compiling $in onto our own base $base"
 
-          $p = Start-Process -FilePath $ahk2exe.FullName -NoNewWindow -Wait -PassThru -ArgumentList @(
+          $p = Start-Process -FilePath $ahk2exe -NoNewWindow -Wait -PassThru -ArgumentList @(
             '/silent', 'verbose', '/in', $in, '/out', $out, '/base', $base, '/compress', '0')
           if ($p.ExitCode -ne 0) { throw "Ahk2Exe failed (exit $($p.ExitCode))." }
           if (!(Test-Path $out)) { throw "Setup executable was not produced: $out" }
@@ -265,7 +332,7 @@ jobs:
             if (Test-Path $zipPath) {
               Remove-Item $zipPath -Force
             }
-            Compress-Archive -Path 'AutoHotkey32.exe', 'AutoHotkey64.exe', 'AutoHotkey.chm', 'WindowSpy.ahk', 'license.txt', 'Install.cmd', 'UX' -DestinationPath $zipPath -CompressionLevel Optimal
+            Compress-Archive -Path 'AutoHotkey32.exe', 'AutoHotkey64.exe', 'AutoHotkey.chm', 'WindowSpy.ahk', 'license.txt', 'Install.cmd', 'UX', 'Compiler' -DestinationPath $zipPath -CompressionLevel Optimal
           }
           finally {
             Pop-Location

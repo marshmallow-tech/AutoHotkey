@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - v2.0-marshmallow-dev
+    tags:
+      # Release tags for this fork, e.g. v2.0.26-marshmallow. Pushing one builds and
+      # uploads the same zip/setup artifacts as a branch build, named after the tag.
+      - 'v2.0.*-marshmallow'
   pull_request:
     branches:
       - v2.0-marshmallow-dev
@@ -56,10 +60,18 @@ jobs:
         id: meta
         shell: pwsh
         run: |
-          $describe = (git describe --tags --dirty --match "v*").Trim()
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            # Name a tag build after the tag that triggered it. git describe is not safe here:
+            # when several tags point at the same commit it may pick any one of them, which
+            # would silently drop the -marshmallow suffix from the artifact names.
+            $describe = $env:GITHUB_REF_NAME
+          } else {
+            $describe = (git describe --tags --dirty --match "v*").Trim()
+          }
           if (-not $describe) {
             throw "Unable to derive a version from git describe."
           }
+          Write-Host "Building version from: $describe"
 
           $version = $describe.Substring(1)
           $version = $version -replace '-(?=\d+-)', '+'

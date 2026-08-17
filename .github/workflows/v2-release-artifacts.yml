@@ -111,6 +111,36 @@ jobs:
         shell: cmd
         run: msbuild AutoHotkeyx.sln /m /t:Build /p:Configuration=Release /p:Platform=x64
 
+      # The .vcxproj derives the version resource from its own `git describe`, independently of the
+      # artifact names computed above. When the two disagree the mismatch is invisible in CI but
+      # breaks Ahk2Exe, which parses the version resource to decide whether a file is a usable base
+      # file or interpreter. Fail loudly here instead of shipping binaries that disagree with the
+      # tag they were built from.
+      - name: Verify stamped version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stamped = (Get-Item "$PWD\bin\AutoHotkey64.exe").VersionInfo.FileVersion
+          Write-Host "Stamped FileVersion: $stamped"
+          Write-Host "Expected version:    ${{ steps.meta.outputs.version }}"
+
+          # Only tag builds are asserted. A branch build is expected to carry a describe-derived
+          # "2.0.26+15+36fc12ba" version, which is deliberately not a shape Ahk2Exe accepts.
+          if ($env:GITHUB_REF_TYPE -ne 'tag') {
+            Write-Host "Not a tag build; skipping assertions."
+            exit 0
+          }
+
+          if ($stamped -ne '${{ steps.meta.outputs.version }}') {
+            throw "Version resource '$stamped' does not match the build version '${{ steps.meta.outputs.version }}'."
+          }
+          # Ahk2Exe splits on "." and "-" and requires the third field to be numeric before it will
+          # offer the file as a base file (Ahk2Exe.ahk, FindBinsExes).
+          $third = ($stamped -split '[.\-]')[2]
+          if ($third -notmatch '^\d+$') {
+            throw "Version '$stamped' has non-numeric third field '$third'; Ahk2Exe would reject this build."
+          }
+
       # Produces externals\AutoHotkey-v1.1\bin\AutoHotkeyU32.exe, the base Ahk2Exe is compiled
       # onto. Release|Win32 is the Unicode configuration -- the "(mbcs)" ones are ANSI, and the
       # U/A suffix in the target name follows CharacterSet.

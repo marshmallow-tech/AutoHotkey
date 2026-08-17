@@ -401,7 +401,12 @@
     </ItemGroup>
   </Target>
   <Target Name="SetAhkVersion" Condition="Exists('@(AhkVersionInput)')" BeforeTargets="PrepareForBuild">
-    <Exec Condition="'$(RawAhkVersion)'==''" Command="git describe --dirty --match v*" ConsoleToMSBuild="true" IgnoreExitCode="true" EchoOff="true">
+    <!-- --tags is required: without it describe considers annotated tags only, so a release
+    tag created through the GitHub Releases UI (which creates lightweight tags) is walked past
+    in favour of the nearest upstream annotated tag. That stamps a build at the tag as
+    "2.0.26+15+36fc12ba" instead of "2.0.26-marshmallow", and Ahk2Exe rejects that shape when
+    it scans for base files and interpreters. -->
+    <Exec Condition="'$(RawAhkVersion)'==''" Command="git describe --tags --dirty --match v*" ConsoleToMSBuild="true" IgnoreExitCode="true" EchoOff="true">
       <Output PropertyName="GitDescription" TaskParameter="ConsoleOutput" />
     </Exec>
     <PropertyGroup Condition="'$(GitDescription)'!='' and '$(GitDescription.Substring(0,1))'=='v'">

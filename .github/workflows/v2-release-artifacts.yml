@@ -73,9 +73,30 @@ jobs:
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      # The html-help-workshop package fetches htmlhelp.exe from a web.archive.org snapshot --
+      # Microsoft removed the original download -- and archive.org answers 503 when it throttles,
+      # which fails the package's install script and so the whole run. Retry on the same schedule
+      # as the Ahk2Exe downloads below rather than losing a build to one throttled request.
       - name: Install HTML Help Workshop
         shell: pwsh
-        run: choco install html-help-workshop --no-progress -y
+        run: |
+          # choco reports failure through its exit code. Keep native non-zero exits from
+          # throwing (pwsh 7.4+ does by default under 'Stop') so the retry loop can see them.
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+          for ($i = 1; $i -le 4; $i++) {
+            # --force from the second attempt on, so choco re-runs the install script instead of
+            # reporting the half-installed package from the failed attempt as already present.
+            $extra = if ($i -eq 1) { @() } else { @('--force') }
+            choco install html-help-workshop --no-progress -y @extra
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 4) { throw "choco install html-help-workshop failed after 4 attempts (exit $LASTEXITCODE)." }
+            $wait = [math]::Pow(2, $i)
+            Write-Host "Attempt $i failed (exit $LASTEXITCODE); retrying in $wait s"
+            Start-Sleep -Seconds $wait
+          }
 
       - name: Compute artifact metadata
         id: meta

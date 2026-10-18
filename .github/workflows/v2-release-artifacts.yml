@@ -70,6 +70,53 @@ jobs:
           fetch-depth: 0
           path: externals/Ahk2Exe
 
+      # Ahk2Exe and the bundled UX launcher/installer locate interpreters by filename, all of
+      # them looking for the stock "AutoHotkey*.exe". None of them can see the binaries this fork
+      # builds, which is why Ahk2Exe reports "AutoHotkey could not be located!" even when the files
+      # sit right beside it. Rewrite those name patterns to ours. Every edit asserts how many
+      # occurrences it expects, so an upstream change fails the build here rather than silently
+      # producing a package whose launcher finds no interpreter.
+      # (Ahk2Exe itself is patched in "Build Ahk2Exe from source" below, because the git checkout
+      # in that step would revert an edit made here.)
+      - name: Patch bundled tooling for renamed binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Edit-Source([string]$Path, [string]$Find, [string]$Replace, [int]$Expected) {
+            if (!(Test-Path $Path)) { throw "Not found: $Path" }
+            # These are UTF-8-with-BOM AutoHotkey sources; v1 reads a BOM-less file as ANSI, so the
+            # BOM has to survive the rewrite.
+            $bytes = [IO.File]::ReadAllBytes($Path)
+            $bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+            $skip = if ($bom) { 3 } else { 0 }
+            $text = [Text.Encoding]::UTF8.GetString($bytes, $skip, $bytes.Length - $skip)
+            $count = ([regex]::Matches($text, [regex]::Escape($Find))).Count
+            if ($count -ne $Expected) {
+              throw "$Path : expected $Expected occurrence(s) of [$Find], found $count. Upstream changed; update this patch."
+            }
+            [IO.File]::WriteAllText($Path, $text.Replace($Find, $Replace), (New-Object Text.UTF8Encoding $bom))
+            Write-Host "patched $Path ($count)"
+          }
+
+          $ux  = Join-Path $PWD 'externals\AutoHotkeyUX'
+          $rel = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2'
+
+          # Launcher: picks the interpreter that runs .ahk files.
+          Edit-Source "$ux\inc\launcher-common.ahk" "ROOT_DIR '\AutoHotkey*.exe'" "ROOT_DIR '\LastGastWater*.exe'" 1
+          # Installer: enumerates interpreters to install, and to build UIA variants of.
+          Edit-Source "$ux\install.ahk" "this.SourceDir '\AutoHotkey*.exe'" "this.SourceDir '\LastGastWater*.exe'" 2
+          # Installer: the file list deciding which core files get installed at all.
+          Edit-Source "$ux\install.ahk" "'AutoHotkey*.exe', 'AutoHotkey.chm'" "'LastGastWater*.exe', 'AutoHotkey.chm'" 1
+          # Installer self-update runs the 32-bit interpreter out of the source directory.
+          Edit-Source "$ux\install-version.ahk" 'AutoHotkey32.exe' 'LastGastWater32.exe' 2
+          # v1 reload helper resolves the interpreter one level up from UX\.
+          Edit-Source "$ux\reload-v1.ahk" 'AutoHotkey32.exe' 'LastGastWater32.exe' 1
+          # Portable entry point shipped in the zip.
+          Edit-Source "$rel\Install.cmd" 'AutoHotkey32.exe' 'LastGastWater32.exe' 1
+          # The setup script names its own base file through an Ahk2Exe directive.
+          Edit-Source "$rel\AutoHotkey_setup.ahk" '%A_ScriptDir%\AutoHotkey32.exe' '%A_ScriptDir%\LastGastWater32.exe' 1
+
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
 
@@ -141,7 +188,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $stamped = (Get-Item "$PWD\bin\AutoHotkey64.exe").VersionInfo.FileVersion
+          $stamped = (Get-Item "$PWD\bin\LastGastWater64.exe").VersionInfo.FileVersion
           Write-Host "Stamped FileVersion: $stamped"
           Write-Host "Expected version:    ${{ steps.meta.outputs.version }}"
 
@@ -262,10 +309,10 @@ jobs:
 
           # compile_chm.ahk reads docs\static\source\data_index.js and writes Index.hhk using paths
           # relative to the *working directory*, so it has to run from the docs checkout.  And
-          # AutoHotkey32.exe is a GUI-subsystem binary, which PowerShell's call operator does not
+          # LastGastWater32.exe is a GUI-subsystem binary, which PowerShell's call operator does not
           # wait for -- Start-Process -PassThru + WaitForExit is what makes this step synchronous.
           # /ErrorStdOut keeps a script error on the log instead of in a modal dialog nobody can close.
-          $proc = Start-Process -FilePath "$PWD\bin\AutoHotkey32.exe" `
+          $proc = Start-Process -FilePath "$PWD\bin\LastGastWater32.exe" `
             -ArgumentList @('/ErrorStdOut', "$docs\compile_chm.ahk") `
             -WorkingDirectory $docs -NoNewWindow -PassThru
           if (-not $proc.WaitForExit(600000)) {
@@ -283,23 +330,32 @@ jobs:
           $uxRoot = Join-Path $stageRoot 'UX'
 
           Remove-Item $uxRoot -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item (Join-Path $stageRoot 'AutoHotkey32.exe') -Force -ErrorAction SilentlyContinue
-          Remove-Item (Join-Path $stageRoot 'AutoHotkey64.exe') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot 'LastGastWater32.exe') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $stageRoot 'LastGastWater64.exe') -Force -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $stageRoot 'AutoHotkey.chm') -Force -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $stageRoot '~FileInstall.ahk') -Force -ErrorAction SilentlyContinue
 
           New-Item -ItemType Directory -Path $uxRoot -Force | Out-Null
 
-          Copy-Item "$PWD\bin\AutoHotkey32.exe" $stageRoot -Force
-          Copy-Item "$PWD\bin\AutoHotkey64.exe" $stageRoot -Force
+          Copy-Item "$PWD\bin\LastGastWater32.exe" $stageRoot -Force
+          Copy-Item "$PWD\bin\LastGastWater64.exe" $stageRoot -Force
           Copy-Item "$PWD\externals\AutoHotkeyDocs\AutoHotkey.chm" $stageRoot -Force
           Copy-Item "$PWD\externals\AutoHotkeyUX\*.ahk" $uxRoot -Force
           Copy-Item "$PWD\externals\AutoHotkeyUX\inc" (Join-Path $uxRoot 'inc') -Recurse -Force
           Copy-Item "$PWD\externals\AutoHotkeyUX\Templates" (Join-Path $uxRoot 'Templates') -Recurse -Force
           # Compiler\ is appended so make-v2-setup.ahk emits FileInstall lines for the Ahk2Exe
           # built below; the upstream list predates us shipping a compiler.
-          Copy-Item "$PWD\externals\AutoHotkey-Release\zip-files-v2.0.txt" "$PWD\externals\AutoHotkey-Release\zip-files-alpha.txt" -Force
-          Add-Content "$PWD\externals\AutoHotkey-Release\zip-files-alpha.txt" "Compiler"
+          # The interpreter entries are rewritten to this fork's names as well: make-v2-setup.ahk
+          # emits nothing at all for a list entry matching no file, so a stale name here would
+          # produce an installer carrying no interpreter rather than a visible failure.
+          $zipList = "$PWD\externals\AutoHotkey-Release\zip-files-alpha.txt"
+          (Get-Content "$PWD\externals\AutoHotkey-Release\zip-files-v2.0.txt") `
+            -replace '^AutoHotkey32\.exe$', 'LastGastWater32.exe' `
+            -replace '^AutoHotkey64\.exe$', 'LastGastWater64.exe' | Set-Content $zipList
+          Add-Content $zipList "Compiler"
+          foreach ($want in 'LastGastWater32.exe', 'LastGastWater64.exe') {
+            if ((Get-Content $zipList) -notcontains $want) { throw "$want missing from $zipList" }
+          }
 
       # Compiles Ahk2Exe onto our own v1.1 build, so the shipped compiler carries this fork's
       # window identity rather than stock AutoHotkey's. This must run before the installer payload
@@ -316,6 +372,21 @@ jobs:
           # bootstrap compiler came from, rather than whatever master happens to be.
           git -C $src checkout --quiet '${{ steps.toolchain.outputs.tag }}'
           if ($LASTEXITCODE -ne 0) { throw "Could not check out Ahk2Exe at tag ${{ steps.toolchain.outputs.tag }}." }
+
+          # FindBinsExes skips any file not matching "*.bin", "AutoHotkey*.exe" or "Ahk2Exe.exe"
+          # before it ever reads the version resource, so this fork's binaries are invisible to the
+          # base-file scan and to the interpreter lookup Compiler.ahk does through ExeFiles[].
+          $ahkSrc = Join-Path $src 'Ahk2Exe.ahk'
+          $bytes = [IO.File]::ReadAllBytes($ahkSrc)
+          $bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+          $skip = if ($bom) { 3 } else { 0 }
+          $text = [Text.Encoding]::UTF8.GetString($bytes, $skip, $bytes.Length - $skip)
+          $find = '^AutoHotkey.+\.exe$|^Ahk2Exe\.exe$'
+          if (([regex]::Matches($text, [regex]::Escape($find))).Count -ne 1) {
+            throw "Ahk2Exe.ahk: base-file name filter not found as expected; upstream changed, update this patch."
+          }
+          [IO.File]::WriteAllText($ahkSrc, $text.Replace($find, '^AutoHotkey.+\.exe$|^LastGastWater.+\.exe$|^Ahk2Exe\.exe$'), (New-Object Text.UTF8Encoding $bom))
+          Write-Host "Patched Ahk2Exe.ahk base-file name filter"
 
           $compilerDir = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2\Compiler'
           New-Item -ItemType Directory -Path $compilerDir -Force | Out-Null
@@ -335,8 +406,8 @@ jobs:
 
           # Same two constraints as the help-file step: make-v2-setup.ahk starts with
           # SetWorkingDir "include-v2", which is resolved against the caller's working directory,
-          # and the process must be waited on because AutoHotkey32.exe is GUI-subsystem.
-          $proc = Start-Process -FilePath "$PWD\bin\AutoHotkey32.exe" `
+          # and the process must be waited on because LastGastWater32.exe is GUI-subsystem.
+          $proc = Start-Process -FilePath "$PWD\bin\LastGastWater32.exe" `
             -ArgumentList @('/ErrorStdOut', "$release\make-v2-setup.ahk", 'skip-compile') `
             -WorkingDirectory $release -NoNewWindow -PassThru
           if (-not $proc.WaitForExit(600000)) {
@@ -353,14 +424,14 @@ jobs:
 
       # Ahk2Exe embeds the script into a base executable, so the base becomes the installer's
       # own runtime. It must be the AutoHotkey we just built -- AutoHotkey_setup.ahk asks for
-      # exactly that with ";@Ahk2Exe-Base %A_ScriptDir%\AutoHotkey32.exe" -- otherwise the
+      # exactly that with ";@Ahk2Exe-Base %A_ScriptDir%\LastGastWater32.exe" -- otherwise the
       # installer ships as a stock AutoHotkey binary carrying upstream's window identity.
       - name: Compile setup executable
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $ahk2exe = '${{ steps.toolchain.outputs.ahk2exe }}'
-          $base = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2\AutoHotkey32.exe'
+          $base = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2\LastGastWater32.exe'
           $in = Join-Path $PWD 'externals\AutoHotkey-Release\include-v2\AutoHotkey_setup.ahk'
           $out = Join-Path $PWD 'dist\${{ steps.meta.outputs.setup_name }}'
           if (!(Test-Path $base)) { throw "Base file not found (staging step should have copied it): $base" }
@@ -383,7 +454,7 @@ jobs:
             if (Test-Path $zipPath) {
               Remove-Item $zipPath -Force
             }
-            Compress-Archive -Path 'AutoHotkey32.exe', 'AutoHotkey64.exe', 'AutoHotkey.chm', 'WindowSpy.ahk', 'license.txt', 'Install.cmd', 'UX', 'Compiler' -DestinationPath $zipPath -CompressionLevel Optimal
+            Compress-Archive -Path 'LastGastWater32.exe', 'LastGastWater64.exe', 'AutoHotkey.chm', 'WindowSpy.ahk', 'license.txt', 'Install.cmd', 'UX', 'Compiler' -DestinationPath $zipPath -CompressionLevel Optimal
           }
           finally {
             Pop-Location
@@ -392,8 +463,19 @@ jobs:
       - name: Verify packaged artifacts
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           Get-Item "$PWD\dist\${{ steps.meta.outputs.setup_name }}" | Out-Null
-          Get-Item "$PWD\dist\${{ steps.meta.outputs.zip_name }}" | Out-Null
+          $zipPath = (Get-Item "$PWD\dist\${{ steps.meta.outputs.zip_name }}").FullName
+
+          # The rename spans the build, the installer manifest and six bundled scripts, so confirm
+          # the binaries really arrived under their new names instead of trusting that chain.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
+          try { $names = @($zip.Entries.FullName) } finally { $zip.Dispose() }
+          foreach ($want in 'LastGastWater32.exe', 'LastGastWater64.exe', 'Compiler/Ahk2Exe.exe') {
+            if ($names -notcontains $want) { throw "Missing from zip: $want`nZip contains: $($names -join ', ')" }
+          }
+          if ($names -match '^AutoHotkey\d+\.exe$') { throw "A stock-named interpreter is still in the zip." }
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4

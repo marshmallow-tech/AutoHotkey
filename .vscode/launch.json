@@ -8,7 +8,7 @@
             "name": "Debug x64w C++",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "bin_debug/AutoHotkey64.exe",
+            "program": "bin_debug/LastGastWater64.exe",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceRoot}",
@@ -19,7 +19,7 @@
             "type": "autohotkey",
             "request": "launch",
             "program": "${file}",
-            "runtime": "${workspaceRoot}/bin_debug/AutoHotkey64.exe",
+            "runtime": "${workspaceRoot}/bin_debug/LastGastWater64.exe",
             "useDebugDirective": true,
             "args": [],
             "variableCategories": [

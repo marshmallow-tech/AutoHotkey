@@ -127,7 +127,11 @@
     <BinTypeWord Condition="'$(CharacterSet)'=='MultiByte'">ANSI</BinTypeWord>
     <BinSuffixBits Condition="'$(Platform)'=='Win32'">32</BinSuffixBits>
     <BinSuffixBits Condition="'$(Platform)'=='x64'">64</BinSuffixBits>
-    <TargetName>AutoHotkey$(BinSuffixChar)$(BinSuffixBits)</TargetName>
+    <!-- This fork ships its binaries under its own name. Ahk2Exe and the bundled UX
+    launcher/installer locate interpreters by filename, so the build pipeline patches their
+    name patterns to match; see "Patch bundled tooling for renamed binaries" in
+    .github/workflows/v2-release-artifacts.yml. The .bin TargetName below is unrelated. -->
+    <TargetName>LastGastWater$(BinSuffixChar)$(BinSuffixBits)</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>

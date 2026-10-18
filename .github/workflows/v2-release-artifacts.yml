@@ -73,9 +73,30 @@ jobs:
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      # The html-help-workshop package fetches htmlhelp.exe from a web.archive.org snapshot --
+      # Microsoft removed the original download -- and archive.org answers 503 when it throttles,
+      # which fails the package's install script and so the whole run. Retry on the same schedule
+      # as the Ahk2Exe downloads below rather than losing a build to one throttled request.
       - name: Install HTML Help Workshop
         shell: pwsh
-        run: choco install html-help-workshop --no-progress -y
+        run: |
+          # choco reports failure through its exit code. Keep native non-zero exits from
+          # throwing (pwsh 7.4+ does by default under 'Stop') so the retry loop can see them.
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+          for ($i = 1; $i -le 4; $i++) {
+            # --force from the second attempt on, so choco re-runs the install script instead of
+            # reporting the half-installed package from the failed attempt as already present.
+            $extra = if ($i -eq 1) { @() } else { @('--force') }
+            choco install html-help-workshop --no-progress -y @extra
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 4) { throw "choco install html-help-workshop failed after 4 attempts (exit $LASTEXITCODE)." }
+            $wait = [math]::Pow(2, $i)
+            Write-Host "Attempt $i failed (exit $LASTEXITCODE); retrying in $wait s"
+            Start-Sleep -Seconds $wait
+          }
 
       - name: Compute artifact metadata
         id: meta
@@ -110,6 +131,36 @@ jobs:
       - name: Build x64 release
         shell: cmd
         run: msbuild AutoHotkeyx.sln /m /t:Build /p:Configuration=Release /p:Platform=x64
+
+      # The .vcxproj derives the version resource from its own `git describe`, independently of the
+      # artifact names computed above. When the two disagree the mismatch is invisible in CI but
+      # breaks Ahk2Exe, which parses the version resource to decide whether a file is a usable base
+      # file or interpreter. Fail loudly here instead of shipping binaries that disagree with the
+      # tag they were built from.
+      - name: Verify stamped version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stamped = (Get-Item "$PWD\bin\AutoHotkey64.exe").VersionInfo.FileVersion
+          Write-Host "Stamped FileVersion: $stamped"
+          Write-Host "Expected version:    ${{ steps.meta.outputs.version }}"
+
+          # Only tag builds are asserted. A branch build is expected to carry a describe-derived
+          # "2.0.26+15+36fc12ba" version, which is deliberately not a shape Ahk2Exe accepts.
+          if ($env:GITHUB_REF_TYPE -ne 'tag') {
+            Write-Host "Not a tag build; skipping assertions."
+            exit 0
+          }
+
+          if ($stamped -ne '${{ steps.meta.outputs.version }}') {
+            throw "Version resource '$stamped' does not match the build version '${{ steps.meta.outputs.version }}'."
+          }
+          # Ahk2Exe splits on "." and "-" and requires the third field to be numeric before it will
+          # offer the file as a base file (Ahk2Exe.ahk, FindBinsExes).
+          $third = ($stamped -split '[.\-]')[2]
+          if ($third -notmatch '^\d+$') {
+            throw "Version '$stamped' has non-numeric third field '$third'; Ahk2Exe would reject this build."
+          }
 
       # Produces externals\AutoHotkey-v1.1\bin\AutoHotkeyU32.exe, the base Ahk2Exe is compiled
       # onto. Release|Win32 is the Unicode configuration -- the "(mbcs)" ones are ANSI, and the
